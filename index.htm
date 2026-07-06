@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>課堂違規及跟進記錄系統</title>
+    <!-- 引入 PDF.js 用於解析 PDF 學生資料 -->
+    <script src="https://cloudflare.com"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f6f9; color: #333; }
+        .container { max-width: 600px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        h2 { text-align: center; color: #0056b3; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        select, input[type="file"], input[type="date"], button { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        button { background-color: #0056b3; color: white; border: none; font-size: 16px; cursor: pointer; font-weight: bold; margin-top: 10px; }
+        button:hover { background-color: #004085; }
+        .status { margin-top: 5px; color: green; font-size: 14px; }
+        #dateGroup { display: none; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>課堂違規及跟進記錄系統</h2>
+    
+    <!-- 1. 上載學生資料 PDF -->
+    <div class="form-group">
+        <label for="pdfFile">第一步：上載學生名冊 PDF (包含班別、學號、姓名)</label>
+        <input type="file" id="pdfFile" accept=".pdf">
+        <div id="uploadStatus" class="status"></div>
+    </div>
+
+    <!-- 2. 選擇學生 -->
+    <div class="form-group">
+        <label for="studentSelect">第二步：選擇學生</label>
+        <select id="studentSelect" disabled>
+            <option value="">-- 請先上載學生 PDF --</option>
+        </select>
+    </div>
+
+    <!-- 3. 違規項目 -->
+    <div class="form-group">
+        <label for="violation">第三步：違規項目</label>
+        <select id="violation">
+            <option value="欠帶課堂物品">欠帶課堂物品</option>
+            <option value="欠家課">欠家課</option>
+            <option value="不遵守課堂規則">不遵守課堂規則</option>
+        </select>
+    </div>
+
+    <!-- 4. 跟進行動 -->
+    <div class="form-group">
+        <label for="action">第四步：跟進行動</label>
+        <select id="action" onchange="toggleDateInput()">
+            <option value="口頭警告">口頭警告</option>
+            <option value="書面警告">書面警告</option>
+            <option value="留堂">留堂</option>
+            <option value="缺點">缺點</option>
+        </select>
+    </div>
+
+    <!-- 5. 留堂日期 (選填) -->
+    <div class="form-group" id="dateGroup">
+        <label for="detentionDate">選擇留堂日期</label>
+        <input type="date" id="detentionDate">
+    </div>
+
+    <!-- 提交與查看按鈕 -->
+    <button onclick="saveRecord()">儲存記錄</button>
+    <button onclick="viewReport()" style="background-color: #28a745;">在新分頁顯示所有資料</button>
+</div>
+
+<script>
+    // 設定 PDF.js 的 Worker
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cloudflare.com';
+
+    let studentList = [];
+
+    // 監聽 PDF 上傳
+    document.getElementById('pdfFile').addEventListener('change', async (e) => {
+        const file = e.target.target || e.target.files[0];
+        if (!file) return;
+
+        document.getElementById('uploadStatus').innerText = "正在解析 PDF 學生資料...";
+        
+        const fileReader = new FileReader();
+        fileReader.onload = async function() {
+            const typedarray = new Uint8Array(this.result);
+            try {
+                const pdf = await pdfjsLib.getDocument(typedarray).promise;
+                let fullText = "";
+                
+                for (let i = 1; i <= pdf.numPages; i++) {
+                    const page = await pdf.getPage(i);
+                    const textContent = await page.getTextContent();
+                    const pageText = textContent.items.map(item => item.str).join(" ");
+                    fullText += pageText + "\n";
+                }
+                
+                parseStudents(fullText);
+            } catch (error) {
+                alert("PDF 解析失敗，請確保文件格式正確。");
+                document.getElementById('uploadStatus').innerText = "";
+            }
+        };
+        fileReader.readAsArrayBuffer(file);
+    });
+
+    // 簡單的文字解析邏輯 (根據常見的空格分隔文字提取 班別、學號、姓名)
+    function parseStudents(text) {
+        const select = document.getElementById('studentSelect');
+        select.innerHTML = '<option value="">-- 請選擇學生 --</option>';
+        studentList = [];
+
+        // 匹配規則範例：1A 01 張小明 或 1A_01_張小明 等格式
+        // 這裡使用正則表達式尋找類似 "班別(如1A/2B) + 學號(數字) + 姓名(中英文)" 的組合
+        const lines = text.split(/[\n\s]+/);
+        
+        // 為了相容不同 PDF，我們這裡捕捉連續的「班別 學號 姓名」結構
+        // 實際應用中，如果格式極度固定，可精準微調此處的正則
+        for(let i = 0; i < lines.length; i++) {
+            const matchClass = lines[i].match(/^[1-6][A-E]$/i); // 匹配 1A-6E 班別
+            if(matchClass && lines[i+1] && lines[i+2]) {
+                const classCode = lines[i];
+                const studentNo = lines[i+1];
+                const name = lines[i+2];
+                
+                // 檢查學號是否為數字，且姓名不是純數字
+                if(/^\d+$/.test(studentNo) && !/^\d+$/.test(name)) {
+                    const studentStr = `${classCode} (${studentNo}) ${name}`;
+                    studentList.push(studentStr);
+                    i += 2; // 跳過已讀取的欄位
+                }
+            }
+        }
+
+        // 如果正則未完全匹配，則退而求其次，將解析到的有意義行數供老師選擇
+        if(studentList.length === 0) {
+            // 兜底方案：每三個非空文字一組
+            const tokens = text.match(/\S+/g) || [];
+            for (let i = 0; i < tokens.length; i += 3) {
+                if(tokens[i] && tokens[i+1] && tokens[i+2]) {
+                    studentList.push(`${tokens[i]} ${tokens[i+1]} ${tokens[i+2]}`);
+                }
+            }
+        }
+
+        // 填入下拉選單
+        if(studentList.length > 0) {
+            studentList.forEach(student => {
+                const opt = document.createElement('option');
+                opt.value = student;
+                opt.textContent = student;
+                select.appendChild(opt);
+            });
+            select.disabled = false;
+            document.getElementById('uploadStatus').innerText = `成功匯入 ${studentList.length} 位學生資料！`;
+        } else {
+            document.getElementById('uploadStatus').innerText = "未能自動識別學生資料，請確認 PDF 內容。";
+        }
+    }
+
+    // 控制留堂日期的顯示與隱藏
+    function toggleDateInput() {
+        const action = document.getElementById('action').value;
+        const dateGroup = document.getElementById('dateGroup');
+        dateGroup.style.display = (action === '留堂') ? 'block' : 'none';
+    }
+
+    // 儲存記錄到瀏覽器的 LocalStorage
+    function saveRecord() {
+        const student = document.getElementById('studentSelect').value;
+        const violation = document.getElementById('violation').value;
+        const action = document.getElementById('action').value;
+        const date = document.getElementById('detentionDate').value;
+
+        if (!student) {
+            alert('請先選擇學生！');
+            return;
+        }
+
+        let actionFinal = action;
+        if (action === '留堂' && date) {
+            actionFinal = `留堂 (日期: ${date})`;
+        } else if (action === '留堂' && !date) {
+            alert('請選擇留堂日期！');
+            return;
+        }
+
+        const record = {
+            timestamp: new Date().toLocaleString('zh-Hant'),
+            student: student,
+            violation: violation,
+            action: actionFinal
+        };
+
+        // 獲取現有記錄
+        let records = JSON.parse(localStorage.getItem('classroom_records')) || [];
+        records.push(record);
+        localStorage.setItem('classroom_records', JSON.stringify(records));
+
+        alert('記錄儲存成功！');
+        // 重置部分表單
+        document.getElementById('violation').selectedIndex = 0;
+        document.getElementById('action').selectedIndex = 0;
+        document.getElementById('detentionDate').value = '';
+        toggleDateInput();
+    }
+
+    // 在新分頁打開並顯示整理好的報告
+    function viewReport() {
+        const reportWindow = window.open();
+        let records = JSON.parse(localStorage.getItem('classroom_records')) || [];
+
+        let rowsHtml = records.map((r, index) => `
+            <tr>
+                <td>${index + 1}</td>
+                <td>${r.timestamp}</td>
+                <td>${r.student}</td>
+                <td>${r.violation}</td>
+                <td>${r.action}</td>
+            </tr>
+        `).join('');
+
+        if(records.length === 0) {
+            rowsHtml = `<tr><td colspan="5" style="text-align:center;">暫無記錄</td></tr>`;
+        }
+
+        // 新分頁的 HTML 內容
+        reportWindow.document.write(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>學生違規與跟進總報告</title>
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 30px; }
+                    h2 { color: #0056b3; }
+                    table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+                    th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+                    th { background-color: #0056b3; color: white; }
+                    tr:nth-child(even) { background-color: #f2f2f2; }
+                    .btn-clear { background-color: #dc3545; color: white; border: none; padding: 10px 15px; cursor: pointer; border-radius: 4px; font-weight: bold; }
+                </style>
+            </head>
+            <body>
+                <h2>學生違規與跟進總報告</h2>
+                <button class="btn-clear" onclick="if(confirm('確定要清除所有記錄嗎？')){window.opener.localStorage.removeItem('classroom_records'); location.reload();}">清除所有記錄</button>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>編號</th>
+                            <th>輸入時間</th>
+                            <th>學生資料 (班別/學號/姓名)</th>
+                            <th>違規項目</th>
+                            <th>跟進行動</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rowsHtml}
+                    </tbody>
+                </table>
